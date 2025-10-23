@@ -22,19 +22,23 @@ class ScreenRecorder: NSObject {
 
     private(set) var outputURL: URL?
 
-    private func createOutputURL() throws -> URL {
-        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
-        
-        // Create directory if it doesn't exist
-        try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
-        
-        return vibeCamDir.appendingPathComponent("screen_recording_\(Date().timeIntervalSince1970).mov")
+    private func createOutputURL(sessionFolder: URL? = nil) throws -> URL {
+        if let sessionFolder = sessionFolder {
+            return sessionFolder.appendingPathComponent("screen_record.mov")
+        } else {
+            let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+            let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
+            
+            // Create directory if it doesn't exist
+            try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
+            
+            return vibeCamDir.appendingPathComponent("screen_recording_\(Date().timeIntervalSince1970).mov")
+        }
     }
     
-    func startRecording(bitrate: Int = 10_000_000) throws {
+    func startRecording(bitrate: Int = 10_000_000, sessionFolder: URL? = nil) throws {
         // Create output URL first
-        outputURL = try createOutputURL()
+        outputURL = try createOutputURL(sessionFolder: sessionFolder)
         
         // Remove existing file if it exists
         if FileManager.default.fileExists(atPath: outputURL!.path) {

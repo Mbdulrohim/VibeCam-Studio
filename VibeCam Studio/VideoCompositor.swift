@@ -17,6 +17,7 @@ class VideoCompositor {
                      overlayPosition: OverlayPosition = .bottomRight,
                      overlaySize: OverlaySizeOption = .auto,
                      exportPreset: String = AVAssetExportPresetHighestQuality,
+                     sessionFolder: URL? = nil,
                      completion: @escaping (Result<URL, Error>) -> Void) {
         let composition = AVMutableComposition()
 
@@ -72,20 +73,31 @@ class VideoCompositor {
 
         print("VideoCompositor: Syncing using overlapping range starting at \(CMTimeGetSeconds(syncStart))s for duration \(CMTimeGetSeconds(syncDuration))s")
 
-        let screenRange = CMTimeRange(start: syncStart, duration: syncDuration)
-        let cameraRange = CMTimeRange(start: syncStart, duration: syncDuration)
-
         do {
-            try compositionScreenTrack.insertTimeRange(screenRange, of: screenVideoTrack, at: .zero)
-            try compositionCameraTrack.insertTimeRange(cameraRange, of: cameraVideoTrack, at: .zero)
+            let desiredRange = CMTimeRange(start: syncStart, duration: syncDuration)
+            let screenIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: screenVideoTrack.timeRange)
+            let cameraIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: cameraVideoTrack.timeRange)
+
+            try compositionScreenTrack.insertTimeRange(screenIntersection,
+                                                      of: screenVideoTrack,
+                                                      at: CMTimeSubtract(screenIntersection.start, syncStart))
+            try compositionCameraTrack.insertTimeRange(cameraIntersection,
+                                                       of: cameraVideoTrack,
+                                                       at: CMTimeSubtract(cameraIntersection.start, syncStart))
 
             // Insert audio track if available
             if let audioTrack = compositionAudioTrack {
                 if let screenAudioTrack = screenAsset.tracks(withMediaType: .audio).first {
-                    try audioTrack.insertTimeRange(screenRange, of: screenAudioTrack, at: .zero)
+                    let audioIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: screenAudioTrack.timeRange)
+                    try audioTrack.insertTimeRange(audioIntersection,
+                                                   of: screenAudioTrack,
+                                                   at: CMTimeSubtract(audioIntersection.start, syncStart))
                     print("VideoCompositor: Inserted screen audio track")
                 } else if let cameraAudioTrack = cameraAsset.tracks(withMediaType: .audio).first {
-                    try audioTrack.insertTimeRange(cameraRange, of: cameraAudioTrack, at: .zero)
+                    let audioIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: cameraAudioTrack.timeRange)
+                    try audioTrack.insertTimeRange(audioIntersection,
+                                                   of: cameraAudioTrack,
+                                                   at: CMTimeSubtract(audioIntersection.start, syncStart))
                     print("VideoCompositor: Inserted camera audio track")
                 }
             }
@@ -245,7 +257,7 @@ class VideoCompositor {
         print("VideoCompositor: Video composition configured with rounded corners")
 
         // Export
-        let outputURL = createOutputURL()
+        let outputURL = createOutputURL(sessionFolder: sessionFolder)
 
         // Remove existing file if present
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -278,13 +290,17 @@ class VideoCompositor {
         }
     }
 
-    private func createOutputURL() -> URL {
-        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
+    private func createOutputURL(sessionFolder: URL? = nil) -> URL {
+        if let sessionFolder = sessionFolder {
+            return sessionFolder.appendingPathComponent("merged_video.mov")
+        } else {
+            let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+            let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
 
-        // Create directory if it doesn't exist
-        try? FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
+            // Create directory if it doesn't exist
+            try? FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
 
-        return vibeCamDir.appendingPathComponent("merged_recording_\(Date().timeIntervalSince1970).mov")
+            return vibeCamDir.appendingPathComponent("merged_recording_\(Date().timeIntervalSince1970).mov")
+        }
     }
 }

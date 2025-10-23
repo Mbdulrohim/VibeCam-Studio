@@ -21,22 +21,27 @@ class CameraService: NSObject {
     
     private(set) var outputURL: URL?
     
-    private func createOutputURL() throws -> URL {
-        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
-        
-        // Create directory if it doesn't exist
-        try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
-        
-        return vibeCamDir.appendingPathComponent("camera_recording_\(Date().timeIntervalSince1970).mov")
+    private func createOutputURL(sessionFolder: URL? = nil) throws -> URL {
+        if let sessionFolder = sessionFolder {
+            return sessionFolder.appendingPathComponent("person_video.mov")
+        } else {
+            let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+            let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
+            
+            // Create directory if it doesn't exist
+            try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
+            
+            return vibeCamDir.appendingPathComponent("camera_recording_\(Date().timeIntervalSince1970).mov")
+        }
     }
     
     func startRecording(camera: AVCaptureDevice? = nil,
                         bitrate: Int = 5_000_000,
                         sessionPreset: AVCaptureSession.Preset = .hd1920x1080,
-                        outputDimensions: (width: Int, height: Int)? = nil) async throws {
+                        outputDimensions: (width: Int, height: Int)? = nil,
+                        sessionFolder: URL? = nil) async throws {
         // Create output URL first
-        outputURL = try createOutputURL()
+        outputURL = try createOutputURL(sessionFolder: sessionFolder)
         
         // Remove existing file if it exists
         if FileManager.default.fileExists(atPath: outputURL!.path) {

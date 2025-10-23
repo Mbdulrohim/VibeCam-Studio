@@ -93,6 +93,7 @@ class RecordingViewModel: ObservableObject {
     private var screenRecorder: ScreenRecorder?
     private var cameraService: CameraService?
     private var videoCompositor: VideoCompositor?
+    private var sessionFolderURL: URL?
 
     init() {
         setupServices()
@@ -102,6 +103,26 @@ class RecordingViewModel: ObservableObject {
         screenRecorder = ScreenRecorder()
         cameraService = CameraService()
         videoCompositor = VideoCompositor()
+    }
+
+    private func createSessionFolder() throws -> URL {
+        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
+
+        // Create VibeCam directory if it doesn't exist
+        try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
+
+        // Create timestamped session folder
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let timestamp = dateFormatter.string(from: Date())
+        let sessionFolderName = "Recording_\(timestamp)"
+        let sessionFolder = vibeCamDir.appendingPathComponent(sessionFolderName)
+
+        // Create session folder
+        try FileManager.default.createDirectory(at: sessionFolder, withIntermediateDirectories: true, attributes: nil)
+
+        return sessionFolder
     }
 
     func startRecording() {
@@ -138,6 +159,12 @@ class RecordingViewModel: ObservableObject {
                     return
                 }
 
+                // Create session folder
+                let sessionFolder = try createSessionFolder()
+                await MainActor.run {
+                    self.sessionFolderURL = sessionFolder
+                }
+
                 // Start recording
                 await MainActor.run {
                     isRecording = true
@@ -145,7 +172,7 @@ class RecordingViewModel: ObservableObject {
                 }
 
                 // Start screen recording with quality settings
-                try screenRecorder?.startRecording(bitrate: recordingQuality.bitrate)
+                try screenRecorder?.startRecording(bitrate: recordingQuality.bitrate, sessionFolder: sessionFolder)
 
                 // Start camera recording if enabled
                 if isCameraEnabled {
@@ -153,7 +180,8 @@ class RecordingViewModel: ObservableObject {
                         try await cameraService?.startRecording(camera: selectedCamera,
                                                               bitrate: recordingQuality.bitrate,
                                                               sessionPreset: recordingQuality.cameraSessionPreset,
-                                                              outputDimensions: recordingQuality.cameraDimensions)
+                                                              outputDimensions: recordingQuality.cameraDimensions,
+                                                              sessionFolder: sessionFolder)
                     } catch {
                         await MainActor.run {
                             isRecording = false
@@ -229,6 +257,7 @@ class RecordingViewModel: ObservableObject {
 
                 await MainActor.run {
                     isRecording = false
+                    self.sessionFolderURL = nil
                 }
 
                 // Wait a moment for files to finish writing
@@ -237,13 +266,14 @@ class RecordingViewModel: ObservableObject {
                 // Merge videos if camera was enabled
                 if isCameraEnabled,
                    let screenURL = screenRecorder?.outputURL,
-                   let cameraURL = cameraService?.outputURL {
+                   let cameraURL = cameraService?.outputURL,
+                   let sessionFolder = self.sessionFolderURL {
 
                     await MainActor.run {
                         statusMessage = "Merging screen and camera videos..."
                     }
 
-                    await mergeVideos(screenURL: screenURL, cameraURL: cameraURL)
+                    await mergeVideos(screenURL: screenURL, cameraURL: cameraURL, sessionFolder: sessionFolder)
                 } else {
                     await MainActor.run {
                         statusMessage = "Recording saved to Downloads/VibeCam folder"
@@ -259,13 +289,13 @@ class RecordingViewModel: ObservableObject {
         }
     }
 
-    private func mergeVideos(screenURL: URL, cameraURL: URL) async {
+    private func mergeVideos(screenURL: URL, cameraURL: URL, sessionFolder: URL) async {
         await withCheckedContinuation { continuation in
-            videoCompositor?.mergeVideos(screenURL: screenURL, cameraURL: cameraURL, overlayPosition: overlayPosition, overlaySize: overlaySize, exportPreset: recordingQuality.exportPreset) { result in
+            videoCompositor?.mergeVideos(screenURL: screenURL, cameraURL: cameraURL, overlayPosition: overlayPosition, overlaySize: overlaySize, exportPreset: recordingQuality.exportPreset, sessionFolder: sessionFolder) { result in
                 Task { @MainActor in
                     switch result {
                     case .success(let mergedURL):
-                        self.statusMessage = "Recording complete! Saved to: \(mergedURL.lastPathComponent)"
+                        self.statusMessage = "Recording complete! Saved to: \(mergedURL.deletingLastPathComponent().lastPathComponent)/"
                     case .failure(let error):
                         self.statusMessage = "Merge failed: \(error.localizedDescription). Individual files saved."
                     }
