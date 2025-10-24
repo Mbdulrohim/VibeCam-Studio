@@ -18,23 +18,24 @@ class CameraService: NSObject {
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var sessionStartTime: CMTime?
     private let sessionQueue = DispatchQueue(label: "CameraServiceSessionQueue")
-    
+    private(set) var wallClockStartTime: Date?
+
     private(set) var outputURL: URL?
-    
+
     private func createOutputURL(sessionFolder: URL? = nil) throws -> URL {
         if let sessionFolder = sessionFolder {
             return sessionFolder.appendingPathComponent("person_video.mov")
         } else {
             let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
             let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
-            
+
             // Create directory if it doesn't exist
             try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
-            
+
             return vibeCamDir.appendingPathComponent("camera_recording_\(Date().timeIntervalSince1970).mov")
         }
     }
-    
+
     func startRecording(camera: AVCaptureDevice? = nil,
                         bitrate: Int = 5_000_000,
                         sessionPreset: AVCaptureSession.Preset = .hd1920x1080,
@@ -42,18 +43,18 @@ class CameraService: NSObject {
                         sessionFolder: URL? = nil) async throws {
         // Create output URL first
         outputURL = try createOutputURL(sessionFolder: sessionFolder)
-        
+
         // Remove existing file if it exists
         if FileManager.default.fileExists(atPath: outputURL!.path) {
             try FileManager.default.removeItem(at: outputURL!)
         }
-        
+
         // Check camera permission (don't request here, should be done in ViewModel)
         let authorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
         guard authorizationStatus == .authorized else {
             throw NSError(domain: "CameraService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Camera access not authorized"])
         }
-        
+
         // Get camera device - use provided camera or default
         let selectedCamera: AVCaptureDevice
         if let providedCamera = camera {
@@ -72,13 +73,13 @@ class CameraService: NSObject {
             selectedCamera = defaultCamera
             print("CameraService: Using default camera: \(defaultCamera.localizedName) (\(defaultCamera.uniqueID))")
         }
-        
+
         // Create capture session
         captureSession = AVCaptureSession()
         guard let captureSession else {
             throw NSError(domain: "CameraService", code: -10, userInfo: [NSLocalizedDescriptionKey: "Failed to create capture session"])
         }
-        
+
         var activePreset = sessionPreset
         if captureSession.canSetSessionPreset(sessionPreset) {
             captureSession.sessionPreset = sessionPreset
@@ -95,7 +96,7 @@ class CameraService: NSObject {
             captureSession.sessionPreset = activePreset
             print("CameraService: Warning - preset \(sessionPreset.rawValue) unsupported, using .high")
         }
-        
+
         // Add camera input
         let cameraInput = try AVCaptureDeviceInput(device: selectedCamera)
         if captureSession.canAddInput(cameraInput) {
@@ -124,7 +125,7 @@ class CameraService: NSObject {
                 throw NSError(domain: "CameraService", code: -3, userInfo: [NSLocalizedDescriptionKey: "Cannot add camera input"])
             }
         }
-        
+
         // Add microphone audio input
         if let audioDevice = AVCaptureDevice.default(for: .audio) {
             do {
@@ -137,35 +138,35 @@ class CameraService: NSObject {
                 print("CameraService: Failed to add audio input: \(error.localizedDescription)")
             }
         }
-        
+
         // Create video output
         videoOutput = AVCaptureVideoDataOutput()
         videoOutput?.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ]
         videoOutput?.alwaysDiscardsLateVideoFrames = false
-        
+
         let queue = DispatchQueue(label: "CameraQueue")
         videoOutput?.setSampleBufferDelegate(self, queue: queue)
-        
+
         guard captureSession.canAddOutput(videoOutput!) else {
             throw NSError(domain: "CameraService", code: -4, userInfo: [NSLocalizedDescriptionKey: "Cannot add video output"])
         }
         captureSession.addOutput(videoOutput!)
-        
+
         // Create audio output
         audioOutput = AVCaptureAudioDataOutput()
         let audioQueue = DispatchQueue(label: "CameraAudioQueue")
         audioOutput?.setSampleBufferDelegate(self, queue: audioQueue)
-        
+
         if captureSession.canAddOutput(audioOutput!) {
             captureSession.addOutput(audioOutput!)
             print("CameraService: Added audio output")
         }
-        
+
         // Create asset writer
         assetWriter = try AVAssetWriter(outputURL: outputURL!, fileType: .mov)
-        
+
         // Video input settings
         func dimensions(for preset: AVCaptureSession.Preset) -> (Int, Int) {
             switch preset {
@@ -177,7 +178,7 @@ class CameraService: NSObject {
         }
         let targetDimensions = outputDimensions ?? dimensions(for: activePreset)
         print("CameraService: Using output dimensions: \(targetDimensions.width) x \(targetDimensions.height)")
-        
+
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: targetDimensions.width,
@@ -187,28 +188,28 @@ class CameraService: NSObject {
                 AVVideoMaxKeyFrameIntervalKey: 30
             ]
         ]
-        
+
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput?.expectsMediaDataInRealTime = true
-        
+
         // Pixel buffer adaptor
         let pixelBufferAttributes: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: targetDimensions.width,
             kCVPixelBufferHeightKey as String: targetDimensions.height
         ]
-        
+
         pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: videoInput!,
             sourcePixelBufferAttributes: pixelBufferAttributes
         )
-        
+
         guard assetWriter!.canAdd(videoInput!) else {
             throw NSError(domain: "CameraService", code: -5, userInfo: [NSLocalizedDescriptionKey: "Cannot add video input"])
         }
-        
+
         assetWriter!.add(videoInput!)
-        
+
         // Audio input settings
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -216,16 +217,17 @@ class CameraService: NSObject {
             AVNumberOfChannelsKey: 2,
             AVEncoderBitRateKey: 128000
         ]
-        
+
         audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         audioInput?.expectsMediaDataInRealTime = true
-        
+
         if assetWriter!.canAdd(audioInput!) {
             assetWriter!.add(audioInput!)
             print("CameraService: Added audio input to asset writer")
         }
-        
+
         sessionStartTime = nil
+        wallClockStartTime = nil
 
         // Start writing
         guard assetWriter!.startWriting() else {
@@ -233,24 +235,49 @@ class CameraService: NSObject {
             print("AVAssetWriter failed to start writing: \(error?.localizedDescription ?? "Unknown error")")
             throw NSError(domain: "CameraService", code: -6, userInfo: [NSLocalizedDescriptionKey: "Failed to start writing: \(error?.localizedDescription ?? "Unknown error")"])
         }
-        
+
         // Start capture session
         captureSession.startRunning()
         print("CameraService: Capture session started")
     }
-    
-    func stopRecording() throws {
+
+    func stopRecording() async throws -> URL? {
         captureSession?.stopRunning()
         captureSession = nil
         sessionStartTime = nil
-        
+
         videoInput?.markAsFinished()
         audioInput?.markAsFinished()
-        assetWriter?.finishWriting {
-            if let url = self.outputURL {
-                print("Camera recording saved to: \(url.path)")
+
+        guard let assetWriter else {
+            let url = outputURL
+            cleanupWriterResources()
+            return url
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            assetWriter.finishWriting {
+                defer { self.cleanupWriterResources() }
+
+                if let error = assetWriter.error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                if let url = self.outputURL {
+                    print("Camera recording saved to: \(url.path)")
+                }
+
+                continuation.resume(returning: self.outputURL)
             }
         }
+    }
+
+    private func cleanupWriterResources() {
+        assetWriter = nil
+        videoInput = nil
+        audioInput = nil
+        pixelBufferAdaptor = nil
     }
 }
 
@@ -258,18 +285,19 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
     func captureOutput(_ output: AVCaptureOutput,
                       didOutput sampleBuffer: CMSampleBuffer,
                       from connection: AVCaptureConnection) {
-        
+
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        
+
         // Start session on first sample (video or audio) - thread-safe
         sessionQueue.sync {
             if sessionStartTime == nil {
                 sessionStartTime = presentationTime
+                wallClockStartTime = Date()
                 assetWriter?.startSession(atSourceTime: presentationTime)
-                print("CameraService: Started session at time: \(CMTimeGetSeconds(presentationTime))")
+                print("CameraService: Started session at time: \(CMTimeGetSeconds(presentationTime)), wall clock: \(wallClockStartTime!)")
             }
         }
-        
+
         // Handle video samples
         if output is AVCaptureVideoDataOutput {
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {

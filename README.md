@@ -20,7 +20,7 @@ A modern macOS screen recording application with floating camera overlay, built 
 
 ![VibeCam Studio Preview](Screenshot%202025-10-23%20at%2011.02.50.png)
 
-*The main interface showing screen recording controls and camera overlay positioning options*
+_The main interface showing screen recording controls and camera overlay positioning options_
 
 ## Installation
 
@@ -32,12 +32,14 @@ A modern macOS screen recording application with floating camera overlay, built 
 ### Building from Source
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/Mbdulrohim/VibeCam-Studio.git
 cd VibeCam-Studio
 ```
 
 2. Open the project in Xcode:
+
 ```bash
 open "VibeCam Studio.xcodeproj"
 ```
@@ -61,6 +63,7 @@ open "VibeCam Studio.xcodeproj"
 ### Output Structure
 
 Each recording creates a timestamped folder containing:
+
 ```
 Recording_2025-10-23_14-30-00/
 ├── person_video.mov      # Camera feed recording
@@ -147,6 +150,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Author
 
 **Mbdulrohim**
+
 - X (Twitter): [@mbdulrohim](https://x.com/mbdulrohim)
 - GitHub: [Mbdulrohim](https://github.com/Mbdulrohim)
 
@@ -159,6 +163,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Release Notes
 
 ### v1.0.0 (October 23, 2025)
+
 - Initial release
 - Screen recording with camera overlay
 - Multiple quality settings
@@ -169,4 +174,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-*VibeCam Studio - Professional screen recording made simple.*
+_VibeCam Studio - Professional screen recording made simple._

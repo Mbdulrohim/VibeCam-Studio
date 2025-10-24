@@ -19,6 +19,7 @@ class ScreenRecorder: NSObject {
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var sessionStartTime: CMTime?
     private let sessionQueue = DispatchQueue(label: "ScreenRecorderSessionQueue")
+    private(set) var wallClockStartTime: Date?
 
     private(set) var outputURL: URL?
 
@@ -28,18 +29,18 @@ class ScreenRecorder: NSObject {
         } else {
             let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
             let vibeCamDir = downloadsURL.appendingPathComponent("VibeCam")
-            
+
             // Create directory if it doesn't exist
             try FileManager.default.createDirectory(at: vibeCamDir, withIntermediateDirectories: true, attributes: nil)
-            
+
             return vibeCamDir.appendingPathComponent("screen_recording_\(Date().timeIntervalSince1970).mov")
         }
     }
-    
+
     func startRecording(bitrate: Int = 10_000_000, sessionFolder: URL? = nil) throws {
         // Create output URL first
         outputURL = try createOutputURL(sessionFolder: sessionFolder)
-        
+
         // Remove existing file if it exists
         if FileManager.default.fileExists(atPath: outputURL!.path) {
             try FileManager.default.removeItem(at: outputURL!)
@@ -53,7 +54,7 @@ class ScreenRecorder: NSObject {
         screenInput = AVCaptureScreenInput(displayID: CGMainDisplayID())
         screenInput?.minFrameDuration = CMTimeMake(value: 1, timescale: 30) // 30 FPS
         screenInput?.capturesMouseClicks = true
-        
+
         print("Screen input created for display ID: \(CGMainDisplayID())")
         print("Display bounds: \(CGDisplayBounds(CGMainDisplayID()))")
 
@@ -61,7 +62,7 @@ class ScreenRecorder: NSObject {
             throw NSError(domain: "ScreenRecorder", code: -1, userInfo: [NSLocalizedDescriptionKey: "Cannot add screen input"])
         }
         captureSession?.addInput(screenInput!)
-        
+
         // Add microphone audio input
         if let audioDevice = AVCaptureDevice.default(for: .audio) {
             do {
@@ -89,12 +90,12 @@ class ScreenRecorder: NSObject {
             throw NSError(domain: "ScreenRecorder", code: -4, userInfo: [NSLocalizedDescriptionKey: "Cannot add video output"])
         }
         captureSession?.addOutput(videoOutput!)
-        
+
         // Create audio output
         audioOutput = AVCaptureAudioDataOutput()
         let audioQueue = DispatchQueue(label: "ScreenRecorderAudioQueue")
         audioOutput?.setSampleBufferDelegate(self, queue: audioQueue)
-        
+
         if captureSession?.canAddOutput(audioOutput!) == true {
             captureSession?.addOutput(audioOutput!)
             print("ScreenRecorder: Added audio output")
@@ -134,7 +135,7 @@ class ScreenRecorder: NSObject {
         }
 
         assetWriter!.add(videoInput!)
-        
+
         // Audio input settings
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -142,16 +143,17 @@ class ScreenRecorder: NSObject {
             AVNumberOfChannelsKey: 2,
             AVEncoderBitRateKey: 128000
         ]
-        
+
         audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         audioInput?.expectsMediaDataInRealTime = true
-        
+
         if assetWriter!.canAdd(audioInput!) {
             assetWriter!.add(audioInput!)
             print("ScreenRecorder: Added audio input to asset writer")
         }
 
         sessionStartTime = nil
+        wallClockStartTime = nil
 
         // Start writing
         guard assetWriter!.startWriting() else {
@@ -165,18 +167,43 @@ class ScreenRecorder: NSObject {
         print("ScreenRecorder: Capture session started")
     }
 
-    func stopRecording() throws {
+    func stopRecording() async throws -> URL? {
         captureSession?.stopRunning()
         captureSession = nil
         sessionStartTime = nil
 
         videoInput?.markAsFinished()
         audioInput?.markAsFinished()
-        assetWriter?.finishWriting {
-            if let url = self.outputURL {
-                print("Screen recording saved to: \(url.path)")
+
+        guard let assetWriter else {
+            let url = outputURL
+            cleanupWriterResources()
+            return url
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            assetWriter.finishWriting {
+                defer { self.cleanupWriterResources() }
+
+                if let error = assetWriter.error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                if let url = self.outputURL {
+                    print("Screen recording saved to: \(url.path)")
+                }
+
+                continuation.resume(returning: self.outputURL)
             }
         }
+    }
+
+    private func cleanupWriterResources() {
+        assetWriter = nil
+        videoInput = nil
+        audioInput = nil
+        pixelBufferAdaptor = nil
     }
 }
 
@@ -184,18 +211,19 @@ extension ScreenRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
     func captureOutput(_ output: AVCaptureOutput,
                       didOutput sampleBuffer: CMSampleBuffer,
                       from connection: AVCaptureConnection) {
-        
+
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        
+
         // Start session on first sample (video or audio) - thread-safe
         sessionQueue.sync {
             if sessionStartTime == nil {
                 sessionStartTime = presentationTime
+                wallClockStartTime = Date()
                 assetWriter?.startSession(atSourceTime: presentationTime)
-                print("ScreenRecorder: Started session at time: \(CMTimeGetSeconds(presentationTime))")
+                print("ScreenRecorder: Started session at time: \(CMTimeGetSeconds(presentationTime)), wall clock: \(wallClockStartTime!)")
             }
         }
-        
+
         // Handle video samples
         if output is AVCaptureVideoDataOutput {
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {

@@ -14,6 +14,8 @@ class VideoCompositor {
 
     func mergeVideos(screenURL: URL,
                      cameraURL: URL,
+                     screenStartTime: Date? = nil,
+                     cameraStartTime: Date? = nil,
                      overlayPosition: OverlayPosition = .bottomRight,
                      overlaySize: OverlaySizeOption = .auto,
                      exportPreset: String = AVAssetExportPresetHighestQuality,
@@ -53,52 +55,75 @@ class VideoCompositor {
             print("VideoCompositor: No audio tracks found in either video")
         }
 
-        // Determine overlapping time range for sync
+        // Determine synchronization using wall-clock timestamps if available
         let screenTimeRange = screenVideoTrack.timeRange
         let cameraTimeRange = cameraVideoTrack.timeRange
-        let screenStart = screenTimeRange.start
-        let cameraStart = cameraTimeRange.start
+        
+        var screenOffset = CMTime.zero
+        var cameraOffset = CMTime.zero
+        
+        // Calculate offset based on wall-clock start times
+        if let screenStart = screenStartTime, let cameraStart = cameraStartTime {
+            let timeDifference = cameraStart.timeIntervalSince(screenStart)
+            print("VideoCompositor: Wall-clock time difference: \(timeDifference)s (camera started \(timeDifference > 0 ? "after" : "before") screen)")
+            
+            if timeDifference > 0 {
+                // Camera started after screen, offset camera video
+                cameraOffset = CMTime(seconds: timeDifference, preferredTimescale: 600)
+            } else if timeDifference < 0 {
+                // Screen started after camera, offset screen video
+                screenOffset = CMTime(seconds: -timeDifference, preferredTimescale: 600)
+            }
+        }
+        
+        // Calculate the overlapping duration
+        let screenStart = CMTimeAdd(screenTimeRange.start, screenOffset)
+        let cameraStart = CMTimeAdd(cameraTimeRange.start, cameraOffset)
         let screenEnd = CMTimeAdd(screenStart, screenTimeRange.duration)
         let cameraEnd = CMTimeAdd(cameraStart, cameraTimeRange.duration)
-
+        
         let syncStart = CMTimeMaximum(screenStart, cameraStart)
         let syncEnd = CMTimeMinimum(screenEnd, cameraEnd)
-
+        
         guard syncEnd > syncStart else {
             completion(.failure(NSError(domain: "VideoCompositor", code: -5, userInfo: [NSLocalizedDescriptionKey: "No overlapping time range between screen and camera recordings"])))
             return
         }
-
+        
         let syncDuration = CMTimeSubtract(syncEnd, syncStart)
-
+        
+        print("VideoCompositor: Screen offset: \(CMTimeGetSeconds(screenOffset))s, Camera offset: \(CMTimeGetSeconds(cameraOffset))s")
         print("VideoCompositor: Syncing using overlapping range starting at \(CMTimeGetSeconds(syncStart))s for duration \(CMTimeGetSeconds(syncDuration))s")
 
         do {
-            let desiredRange = CMTimeRange(start: syncStart, duration: syncDuration)
-            let screenIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: screenVideoTrack.timeRange)
-            let cameraIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: cameraVideoTrack.timeRange)
-
-            try compositionScreenTrack.insertTimeRange(screenIntersection,
+            // Insert video tracks with proper offsets
+            let screenSourceStart = CMTimeSubtract(syncStart, screenOffset)
+            let cameraSourceStart = CMTimeSubtract(syncStart, cameraOffset)
+            
+            let screenSourceRange = CMTimeRange(start: screenSourceStart, duration: syncDuration)
+            let cameraSourceRange = CMTimeRange(start: cameraSourceStart, duration: syncDuration)
+            
+            try compositionScreenTrack.insertTimeRange(screenSourceRange,
                                                       of: screenVideoTrack,
-                                                      at: CMTimeSubtract(screenIntersection.start, syncStart))
-            try compositionCameraTrack.insertTimeRange(cameraIntersection,
+                                                      at: .zero)
+            try compositionCameraTrack.insertTimeRange(cameraSourceRange,
                                                        of: cameraVideoTrack,
-                                                       at: CMTimeSubtract(cameraIntersection.start, syncStart))
+                                                       at: .zero)
 
-            // Insert audio track if available
+            // Insert audio track if available (use screen audio with proper offset)
             if let audioTrack = compositionAudioTrack {
                 if let screenAudioTrack = screenAsset.tracks(withMediaType: .audio).first {
-                    let audioIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: screenAudioTrack.timeRange)
-                    try audioTrack.insertTimeRange(audioIntersection,
+                    let audioSourceRange = CMTimeRange(start: screenSourceStart, duration: syncDuration)
+                    try audioTrack.insertTimeRange(audioSourceRange,
                                                    of: screenAudioTrack,
-                                                   at: CMTimeSubtract(audioIntersection.start, syncStart))
-                    print("VideoCompositor: Inserted screen audio track")
+                                                   at: .zero)
+                    print("VideoCompositor: Inserted screen audio track with offset")
                 } else if let cameraAudioTrack = cameraAsset.tracks(withMediaType: .audio).first {
-                    let audioIntersection = CMTimeRangeGetIntersection(desiredRange, otherRange: cameraAudioTrack.timeRange)
-                    try audioTrack.insertTimeRange(audioIntersection,
+                    let audioSourceRange = CMTimeRange(start: cameraSourceStart, duration: syncDuration)
+                    try audioTrack.insertTimeRange(audioSourceRange,
                                                    of: cameraAudioTrack,
-                                                   at: CMTimeSubtract(audioIntersection.start, syncStart))
-                    print("VideoCompositor: Inserted camera audio track")
+                                                   at: .zero)
+                    print("VideoCompositor: Inserted camera audio track with offset")
                 }
             }
         } catch {
@@ -191,15 +216,6 @@ class VideoCompositor {
         borderLayer.strokeColor = CGColor(red: 1, green: 1, blue: 1, alpha: 1.0)
         borderLayer.lineWidth = 4
         borderLayer.frame = CGRect(x: 0, y: 0, width: pipWidth, height: pipHeight)
-
-        // Add a subtle delay before showing border to avoid white box on empty layer
-        let animation = CABasicAnimation(keyPath: "opacity")
-        animation.fromValue = 0
-        animation.toValue = 1
-        animation.duration = 0.3
-        animation.beginTime = CACurrentMediaTime() + 0.1
-        animation.fillMode = .backwards
-        borderLayer.add(animation, forKey: "fadeIn")
 
         cameraOverlayLayer.addSublayer(borderLayer)
 

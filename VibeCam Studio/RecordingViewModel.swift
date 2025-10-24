@@ -89,11 +89,15 @@ class RecordingViewModel: ObservableObject {
     @Published var overlayPosition: OverlayPosition = .bottomRight
     @Published var overlaySize: OverlaySizeOption = .auto
     @Published var selectedCamera: AVCaptureDevice?
+    @Published var recordingDuration: TimeInterval = 0
 
     private var screenRecorder: ScreenRecorder?
     private var cameraService: CameraService?
     private var videoCompositor: VideoCompositor?
     private var sessionFolderURL: URL?
+    private var exportedAudioURL: URL?
+    private var recordingStartDate: Date?
+    private var durationTimer: Timer?
 
     init() {
         setupServices()
@@ -129,6 +133,7 @@ class RecordingViewModel: ObservableObject {
         guard !isRecording else { return }
 
         statusMessage = "Starting recording..."
+        exportedAudioURL = nil
 
         // Request permissions and start recording
         Task {
@@ -169,32 +174,40 @@ class RecordingViewModel: ObservableObject {
                 await MainActor.run {
                     isRecording = true
                     statusMessage = "Recording screen and camera..."
+                    startDurationTimer()
                 }
 
-                // Start screen recording with quality settings
-                try screenRecorder?.startRecording(bitrate: recordingQuality.bitrate, sessionFolder: sessionFolder)
-
-                // Start camera recording if enabled
+                // Start both recordings simultaneously to ensure sync
                 if isCameraEnabled {
-                    do {
-                        try await cameraService?.startRecording(camera: selectedCamera,
-                                                              bitrate: recordingQuality.bitrate,
-                                                              sessionPreset: recordingQuality.cameraSessionPreset,
-                                                              outputDimensions: recordingQuality.cameraDimensions,
-                                                              sessionFolder: sessionFolder)
-                    } catch {
-                        await MainActor.run {
-                            isRecording = false
-                            statusMessage = "Failed to start camera recording: \(error.localizedDescription)"
+                    // Start both at the same time using async tasks
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        // Start screen recording
+                        group.addTask {
+                            try self.screenRecorder?.startRecording(bitrate: self.recordingQuality.bitrate, sessionFolder: sessionFolder)
                         }
-                        return
+                        
+                        // Start camera recording
+                        group.addTask {
+                            try await self.cameraService?.startRecording(camera: self.selectedCamera,
+                                                                        bitrate: self.recordingQuality.bitrate,
+                                                                        sessionPreset: self.recordingQuality.cameraSessionPreset,
+                                                                        outputDimensions: self.recordingQuality.cameraDimensions,
+                                                                        sessionFolder: sessionFolder)
+                        }
+                        
+                        // Wait for both to start
+                        try await group.waitForAll()
                     }
+                } else {
+                    // Only screen recording
+                    try screenRecorder?.startRecording(bitrate: recordingQuality.bitrate, sessionFolder: sessionFolder)
                 }
 
             } catch {
                 await MainActor.run {
                     isRecording = false
                     statusMessage = "Failed to start recording: \(error.localizedDescription)"
+                    stopDurationTimer()
                 }
             }
         }
@@ -250,24 +263,53 @@ class RecordingViewModel: ObservableObject {
         Task {
             do {
                 // Stop recordings
-                try screenRecorder?.stopRecording()
-                if isCameraEnabled {
-                    try cameraService?.stopRecording()
+                var screenRecordingURL: URL?
+                if let screenRecorder = screenRecorder {
+                    screenRecordingURL = try await screenRecorder.stopRecording()
                 }
+
+                var cameraRecordingURL: URL?
+                if isCameraEnabled, let cameraService = cameraService {
+                    cameraRecordingURL = try await cameraService.stopRecording()
+                }
+
+                let sessionFolder = await MainActor.run { self.sessionFolderURL }
 
                 await MainActor.run {
                     isRecording = false
-                    self.sessionFolderURL = nil
+                    stopDurationTimer()
                 }
 
                 // Wait a moment for files to finish writing
-                try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                try await Task.sleep(nanoseconds: 500_000_000)
+
+                // Export standalone audio track if available
+                var audioExportURL: URL?
+                if let sessionFolder,
+                   let screenURL = screenRecordingURL ?? screenRecorder?.outputURL {
+                    await MainActor.run {
+                        statusMessage = "Exporting audio track..."
+                    }
+
+                    do {
+                        audioExportURL = try await exportAudioTrack(from: screenURL, sessionFolder: sessionFolder)
+                    } catch {
+                        print("RecordingViewModel: Audio export failed with error: \(error.localizedDescription)")
+                        await MainActor.run {
+                            statusMessage = "Audio export failed: \(error.localizedDescription). Continuing with video processing."
+                        }
+                    }
+                }
+
+                await MainActor.run {
+                    self.exportedAudioURL = audioExportURL
+                }
 
                 // Merge videos if camera was enabled
                 if isCameraEnabled,
-                   let screenURL = screenRecorder?.outputURL,
-                   let cameraURL = cameraService?.outputURL,
-                   let sessionFolder = self.sessionFolderURL {
+                   let screenURL = screenRecordingURL ?? screenRecorder?.outputURL,
+                   let cameraURL = cameraRecordingURL ?? cameraService?.outputURL,
+                   let sessionFolder = sessionFolder {
 
                     await MainActor.run {
                         statusMessage = "Merging screen and camera videos..."
@@ -277,6 +319,11 @@ class RecordingViewModel: ObservableObject {
                 } else {
                     await MainActor.run {
                         statusMessage = "Recording saved to Downloads/VibeCam folder"
+                        if let audioFileName = self.exportedAudioURL?.lastPathComponent {
+                            statusMessage = "Recording saved to Downloads/VibeCam folder (Audio: \(audioFileName))"
+                        }
+                        self.sessionFolderURL = nil
+                        self.exportedAudioURL = nil
                     }
                 }
 
@@ -284,6 +331,8 @@ class RecordingViewModel: ObservableObject {
                 await MainActor.run {
                     isRecording = false
                     statusMessage = "Error stopping recording: \(error.localizedDescription)"
+                    self.exportedAudioURL = nil
+                    stopDurationTimer()
                 }
             }
         }
@@ -291,18 +340,104 @@ class RecordingViewModel: ObservableObject {
 
     private func mergeVideos(screenURL: URL, cameraURL: URL, sessionFolder: URL) async {
         await withCheckedContinuation { continuation in
-            videoCompositor?.mergeVideos(screenURL: screenURL, cameraURL: cameraURL, overlayPosition: overlayPosition, overlaySize: overlaySize, exportPreset: recordingQuality.exportPreset, sessionFolder: sessionFolder) { result in
+            // Get wall-clock start times for synchronization
+            let screenStartTime = screenRecorder?.wallClockStartTime
+            let cameraStartTime = cameraService?.wallClockStartTime
+            
+            videoCompositor?.mergeVideos(screenURL: screenURL, 
+                                        cameraURL: cameraURL, 
+                                        screenStartTime: screenStartTime,
+                                        cameraStartTime: cameraStartTime,
+                                        overlayPosition: overlayPosition, 
+                                        overlaySize: overlaySize, 
+                                        exportPreset: recordingQuality.exportPreset, 
+                                        sessionFolder: sessionFolder) { result in
                 Task { @MainActor in
                     switch result {
                     case .success(let mergedURL):
-                        self.statusMessage = "Recording complete! Saved to: \(mergedURL.deletingLastPathComponent().lastPathComponent)/"
+                        let folderName = mergedURL.deletingLastPathComponent().lastPathComponent
+                        var message = "Recording complete! Saved to: \(folderName)/"
+                        if let audioFileName = self.exportedAudioURL?.lastPathComponent {
+                            message += " (Audio: \(audioFileName))"
+                        }
+                        self.statusMessage = message
                     case .failure(let error):
-                        self.statusMessage = "Merge failed: \(error.localizedDescription). Individual files saved."
+                        var message = "Merge failed: \(error.localizedDescription). Individual files saved."
+                        if let audioFileName = self.exportedAudioURL?.lastPathComponent {
+                            message += " Audio track saved as \(audioFileName)."
+                        }
+                        self.statusMessage = message
                     }
+                    self.sessionFolderURL = nil
+                    self.exportedAudioURL = nil
                     continuation.resume()
                 }
             }
         }
+    }
+
+    private func exportAudioTrack(from screenURL: URL, sessionFolder: URL) async throws -> URL? {
+        let asset = AVURLAsset(url: screenURL)
+        guard !asset.tracks(withMediaType: .audio).isEmpty else {
+            print("RecordingViewModel: No audio track found in screen recording - skipping audio export")
+            return nil
+        }
+
+        let audioOutputURL = sessionFolder.appendingPathComponent("session_audio.m4a")
+
+        if FileManager.default.fileExists(atPath: audioOutputURL.path) {
+            try FileManager.default.removeItem(at: audioOutputURL)
+        }
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(domain: "RecordingViewModel", code: -20, userInfo: [NSLocalizedDescriptionKey: "Failed to create audio export session"])
+        }
+
+        exportSession.outputURL = audioOutputURL
+        exportSession.outputFileType = .m4a
+        exportSession.timeRange = CMTimeRange(start: .zero, duration: asset.duration)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
+                case .completed:
+                    print("RecordingViewModel: Audio track exported to \(audioOutputURL.path)")
+                    continuation.resume(returning: audioOutputURL)
+                case .failed, .cancelled:
+                    let error = exportSession.error ?? NSError(domain: "RecordingViewModel", code: -21, userInfo: [NSLocalizedDescriptionKey: "Audio export failed"])
+                    continuation.resume(throwing: error)
+                default:
+                    let error = exportSession.error ?? NSError(domain: "RecordingViewModel", code: -22, userInfo: [NSLocalizedDescriptionKey: "Unexpected audio export status"])
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    deinit {
+        durationTimer?.invalidate()
+    }
+
+    @MainActor
+    private func startDurationTimer() {
+        recordingStartDate = Date()
+        recordingDuration = 0
+        durationTimer?.invalidate()
+        durationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, let startDate = self.recordingStartDate else { return }
+            self.recordingDuration = Date().timeIntervalSince(startDate)
+        }
+        if let durationTimer {
+            RunLoop.main.add(durationTimer, forMode: .common)
+        }
+    }
+
+    @MainActor
+    private func stopDurationTimer() {
+        durationTimer?.invalidate()
+        durationTimer = nil
+        recordingStartDate = nil
+        recordingDuration = 0
     }
 
     private func requestScreenRecordingPermission() async -> Bool {
