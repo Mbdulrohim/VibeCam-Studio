@@ -13,7 +13,7 @@ struct VibeCam_StudioApp: App {
         WindowGroup {
             ContentView()
         }
-        
+
         WindowGroup(id: "floating-camera") {
             FloatingCameraWindow()
         }

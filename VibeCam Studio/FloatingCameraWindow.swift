@@ -13,7 +13,7 @@ struct FloatingCameraWindow: View {
     @State private var position: CGPoint = CGPoint(x: 50, y: 50)
     @State private var isDragging = false
     @State private var dragOffset: CGSize = .zero
-    
+
     var body: some View {
         ZStack {
             // Camera preview
@@ -55,14 +55,14 @@ struct FloatingCameraWindow: View {
 
 struct CameraPreviewView: NSViewRepresentable {
     @ObservedObject var cameraPreview: CameraPreview
-    
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.black.cgColor
         return view
     }
-    
+
     func updateNSView(_ nsView: NSView, context: Context) {
         if let previewLayer = cameraPreview.previewLayer {
             previewLayer.frame = nsView.bounds
@@ -74,33 +74,33 @@ struct CameraPreviewView: NSViewRepresentable {
 class CameraPreview: ObservableObject {
     var previewLayer: AVCaptureVideoPreviewLayer?
     private var captureSession: AVCaptureSession?
-    
+
     init() {
         setupCameraPreview()
     }
-    
+
     private func setupCameraPreview() {
         captureSession = AVCaptureSession()
         captureSession?.sessionPreset = .medium
-        
+
         guard let camera = AVCaptureDevice.default(for: .video) else { return }
-        
+
         do {
             let input = try AVCaptureDeviceInput(device: camera)
             if captureSession?.canAddInput(input) == true {
                 captureSession?.addInput(input)
             }
-            
+
             previewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
             previewLayer?.videoGravity = .resizeAspectFill
-            
+
             captureSession?.startRunning()
-            
+
         } catch {
             print("Error setting up camera preview: \(error)")
         }
     }
-    
+
     deinit {
         captureSession?.stopRunning()
     }
