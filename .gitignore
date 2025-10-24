@@ -4,6 +4,7 @@
 
 ## Build generated files
 .build/
+build/
 DerivedData/
 
 ## User settings
@@ -37,6 +38,10 @@ playground.xcworkspace
 *.ipa
 *.dSYM.zip
 *.dSYM
+*.dmg
+*.zip
+dist/
+dmg_installer/
 
 ## Other
 .DS_Store
